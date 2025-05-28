@@ -66,8 +66,8 @@ class AWSService {
     return true;
   }
 
-  // Send a message to the AWS agent
-  async sendMessage(message) {
+  // Send a message to the AWS agent with streaming response
+  async sendMessage(message, onChunk = null) {
     if (!this.isConnected || !this.client) {
       throw new Error("Not connected to AWS Agent");
     }
@@ -82,13 +82,18 @@ class AWSService {
 
       const response = await this.client.send(command);
 
-      // Process the response stream
+      // Process the response stream with real-time updates
       let fullResponse = "";
       if (response.completion) {
         for await (const chunk of response.completion) {
           if (chunk.chunk && chunk.chunk.bytes) {
             const text = new TextDecoder().decode(chunk.chunk.bytes);
             fullResponse += text;
+
+            // Call the onChunk callback with the new text if provided
+            if (onChunk && typeof onChunk === "function") {
+              onChunk(text, fullResponse);
+            }
           }
         }
       }
@@ -116,6 +121,76 @@ class AWSService {
           "Access denied. Please check your AWS credentials and IAM permissions for Bedrock.";
       } else if (error.name === "ValidationException") {
         errorMessage = `Invalid request parameters: ${error.message}`;
+      }
+
+      throw new Error(errorMessage);
+    }
+  }
+
+  // Send a message with streaming (alternative method for better control)
+  async sendMessageStream(message, callbacks = {}) {
+    if (!this.isConnected || !this.client) {
+      throw new Error("Not connected to AWS Agent");
+    }
+
+    const { onStart, onChunk, onComplete, onError } = callbacks;
+
+    try {
+      if (onStart) onStart();
+
+      const command = new InvokeAgentCommand({
+        agentId: this.config.agentId,
+        agentAliasId: this.config.agentAliasId,
+        sessionId: this.config.sessionId,
+        inputText: message,
+      });
+
+      const response = await this.client.send(command);
+
+      let fullResponse = "";
+      if (response.completion) {
+        for await (const chunk of response.completion) {
+          if (chunk.chunk && chunk.chunk.bytes) {
+            const text = new TextDecoder().decode(chunk.chunk.bytes);
+            fullResponse += text;
+
+            if (onChunk) {
+              onChunk(text, fullResponse);
+            }
+          }
+        }
+      }
+
+      if (onComplete) {
+        onComplete(fullResponse);
+      }
+
+      return {
+        success: true,
+        response: fullResponse || "Agent response received",
+        sessionId: this.config.sessionId,
+      };
+    } catch (error) {
+      console.error("Error sending message to agent:", error);
+
+      let errorMessage = error.message;
+      if (
+        error.name === "ResourceNotFoundException" ||
+        error.$metadata?.httpStatusCode === 404
+      ) {
+        errorMessage = `Agent not found. Please check:\n• Agent ID: ${this.config.agentId}\n• Agent Alias ID: ${this.config.agentAliasId}\n• Region: ${this.config.region}\n• Make sure the agent is in "PREPARED" state`;
+      } else if (
+        error.name === "UnauthorizedOperation" ||
+        error.$metadata?.httpStatusCode === 403
+      ) {
+        errorMessage =
+          "Access denied. Please check your AWS credentials and IAM permissions for Bedrock.";
+      } else if (error.name === "ValidationException") {
+        errorMessage = `Invalid request parameters: ${error.message}`;
+      }
+
+      if (onError) {
+        onError(new Error(errorMessage));
       }
 
       throw new Error(errorMessage);

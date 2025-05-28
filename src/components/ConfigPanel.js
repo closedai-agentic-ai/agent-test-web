@@ -1,12 +1,8 @@
 import React, { useState, useEffect } from "react";
+import { Settings, Wifi, WifiOff, Loader } from "lucide-react";
 import awsService from "../services/awsService";
 
-const ConfigPanel = ({
-  onConnect,
-  onDisconnect,
-  connectionStatus,
-  isConnecting,
-}) => {
+const ConfigPanel = ({ connectionStatus, setConnectionStatus }) => {
   const [config, setConfig] = useState({
     region: "us-east-1",
     agentId: "",
@@ -15,14 +11,20 @@ const ConfigPanel = ({
     secretAccessKey: "",
     sessionId: "",
   });
+  const [isConnecting, setIsConnecting] = useState(false);
+  const [connectionMessage, setConnectionMessage] = useState("");
 
-  // Load existing configuration on component mount
   useEffect(() => {
-    const existingConfig = awsService.getConfig();
-    if (existingConfig.agentId || existingConfig.accessKeyId) {
-      setConfig(existingConfig);
+    // Check initial connection status
+    const status = awsService.getConnectionStatus();
+    setConnectionStatus(status);
+
+    // Load saved config
+    const savedConfig = awsService.getConfig();
+    if (savedConfig) {
+      setConfig(savedConfig);
     }
-  }, []);
+  }, [setConnectionStatus]);
 
   const handleInputChange = (e) => {
     const { name, value } = e.target;
@@ -32,44 +34,119 @@ const ConfigPanel = ({
     }));
   };
 
-  const handleSubmit = (e) => {
+  const generateSessionId = () => {
+    const sessionId = `session-${Date.now()}-${Math.random()
+      .toString(36)
+      .substr(2, 9)}`;
+    setConfig((prev) => ({
+      ...prev,
+      sessionId,
+    }));
+  };
+
+  const handleConnect = async (e) => {
     e.preventDefault();
-    onConnect(config);
+    setIsConnecting(true);
+    setConnectionMessage("");
+
+    try {
+      const result = await awsService.connect(config);
+
+      if (result.success) {
+        setConnectionStatus({
+          isConnected: true,
+          status: "connected",
+          message: "Connected successfully",
+        });
+        setConnectionMessage("Successfully connected to AWS Agent!");
+      } else {
+        setConnectionStatus({
+          isConnected: false,
+          status: "disconnected",
+          message: result.message,
+        });
+        setConnectionMessage(result.message);
+      }
+    } catch (error) {
+      console.error("Connection error:", error);
+      const errorMessage = `Connection failed: ${error.message}`;
+      setConnectionStatus({
+        isConnected: false,
+        status: "disconnected",
+        message: errorMessage,
+      });
+      setConnectionMessage(errorMessage);
+    } finally {
+      setIsConnecting(false);
+    }
   };
 
   const handleDisconnect = () => {
-    if (onDisconnect) {
-      onDisconnect();
-    }
+    awsService.disconnect();
+    setConnectionStatus({
+      isConnected: false,
+      status: "disconnected",
+      message: "Disconnected",
+    });
+    setConnectionMessage("Disconnected from AWS Agent");
+  };
+
+  const getStatusIcon = () => {
+    if (isConnecting) return <Loader className="animate-spin" size={20} />;
+    if (connectionStatus.isConnected) return <Wifi size={20} />;
+    return <WifiOff size={20} />;
   };
 
   const getStatusClass = () => {
     if (isConnecting) return "connecting";
-    return connectionStatus.isConnected ? "connected" : "disconnected";
-  };
-
-  const getStatusText = () => {
-    if (isConnecting) return "Connecting...";
-    if (connectionStatus.isConnected) {
-      return `Connected to Agent: ${connectionStatus.agentId}`;
-    }
-    return "Disconnected";
+    if (connectionStatus.isConnected) return "connected";
+    return "disconnected";
   };
 
   return (
     <div className="config-panel">
-      <h2>AWS Agent Configuration</h2>
+      <h2>
+        <Settings size={24} />
+        AWS Configuration
+      </h2>
 
-      <div className={`status ${getStatusClass()}`}>
-        {getStatusText()}
-        {connectionStatus.sessionId && (
-          <div className="message-time">
-            Session: {connectionStatus.sessionId}
-          </div>
-        )}
+      <div className={`connection-status ${getStatusClass()}`}>
+        {getStatusIcon()}
+        <span>
+          {isConnecting
+            ? "Connecting..."
+            : connectionStatus.isConnected
+            ? "Connected"
+            : "Disconnected"}
+        </span>
       </div>
 
-      <form onSubmit={handleSubmit}>
+      {connectionMessage && (
+        <div
+          className={
+            connectionStatus.isConnected ? "success-message" : "error-message"
+          }
+          style={{
+            padding: "1rem",
+            borderRadius: "12px",
+            marginBottom: "1.5rem",
+            background: connectionStatus.isConnected
+              ? "rgba(76, 175, 80, 0.2)"
+              : "rgba(244, 67, 54, 0.2)",
+            border: `1px solid ${
+              connectionStatus.isConnected
+                ? "rgba(76, 175, 80, 0.4)"
+                : "rgba(244, 67, 54, 0.4)"
+            }`,
+            color: "rgba(255, 255, 255, 0.9)",
+            fontSize: "0.9rem",
+          }}
+        >
+          {connectionMessage}
+        </div>
+      )}
+
+      <form onSubmit={handleConnect}>
         <div className="form-group">
           <label htmlFor="region">AWS Region</label>
           <select
@@ -95,7 +172,7 @@ const ConfigPanel = ({
             name="agentId"
             value={config.agentId}
             onChange={handleInputChange}
-            placeholder="Enter your AWS Agent ID"
+            placeholder="Enter your Bedrock Agent ID"
             required
           />
         </div>
@@ -108,7 +185,7 @@ const ConfigPanel = ({
             name="agentAliasId"
             value={config.agentAliasId}
             onChange={handleInputChange}
-            placeholder="Enter Agent Alias ID (default: TSTALIASID)"
+            placeholder="TSTALIASID"
             required
           />
         </div>
@@ -121,7 +198,7 @@ const ConfigPanel = ({
             name="accessKeyId"
             value={config.accessKeyId}
             onChange={handleInputChange}
-            placeholder="Enter your AWS Access Key ID"
+            placeholder="Your AWS Access Key ID"
             required
           />
         </div>
@@ -134,65 +211,78 @@ const ConfigPanel = ({
             name="secretAccessKey"
             value={config.secretAccessKey}
             onChange={handleInputChange}
-            placeholder="Enter your AWS Secret Access Key"
+            placeholder="Your AWS Secret Access Key"
             required
           />
         </div>
 
         <div className="form-group">
-          <label htmlFor="sessionId">Session ID (Optional)</label>
-          <input
-            type="text"
-            id="sessionId"
-            name="sessionId"
-            value={config.sessionId}
-            onChange={handleInputChange}
-            placeholder="Leave empty for auto-generated session ID"
-          />
+          <label htmlFor="sessionId">Session ID</label>
+          <div style={{ display: "flex", gap: "0.5rem" }}>
+            <input
+              type="text"
+              id="sessionId"
+              name="sessionId"
+              value={config.sessionId}
+              onChange={handleInputChange}
+              placeholder="Auto-generated session ID"
+              style={{ flex: 1 }}
+            />
+            <button
+              type="button"
+              onClick={generateSessionId}
+              style={{
+                background: "rgba(255, 255, 255, 0.2)",
+                border: "1px solid rgba(255, 255, 255, 0.3)",
+                color: "rgba(255, 255, 255, 0.9)",
+                padding: "0.75rem 1rem",
+                fontSize: "0.9rem",
+                minWidth: "auto",
+              }}
+            >
+              Generate
+            </button>
+          </div>
         </div>
 
-        <button
-          type="submit"
-          className="btn"
-          disabled={isConnecting || connectionStatus.isConnected}
-        >
-          {isConnecting
-            ? "Connecting..."
-            : connectionStatus.isConnected
-            ? "Connected"
-            : "Connect to Agent"}
-        </button>
+        <div style={{ display: "flex", gap: "1rem", marginTop: "2rem" }}>
+          {!connectionStatus.isConnected ? (
+            <button type="submit" disabled={isConnecting} style={{ flex: 1 }}>
+              {isConnecting ? "Connecting..." : "Connect"}
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={handleDisconnect}
+              style={{
+                flex: 1,
+                background: "linear-gradient(135deg, #ff6b6b 0%, #ee5a52 100%)",
+                boxShadow: "0 4px 15px rgba(255, 107, 107, 0.3)",
+              }}
+            >
+              Disconnect
+            </button>
+          )}
+        </div>
       </form>
 
-      {connectionStatus.isConnected && (
-        <div style={{ marginTop: "1rem" }}>
-          <button
-            type="button"
-            className="btn"
-            onClick={handleDisconnect}
-            style={{ background: "#dc3545" }}
-          >
-            Disconnect
-          </button>
-        </div>
-      )}
-
       <div
+        className="warning-box"
         style={{
           marginTop: "2rem",
-          padding: "1rem",
-          background: "#f8f9fa",
-          borderRadius: "8px",
+          padding: "1.5rem",
+          fontSize: "0.9rem",
+          lineHeight: "1.5",
         }}
       >
-        <h3 style={{ marginBottom: "0.5rem", fontSize: "1rem" }}>
+        <h4 style={{ marginBottom: "1rem", color: "white", fontWeight: "600" }}>
           Setup Instructions:
-        </h3>
-        <ol style={{ fontSize: "0.9rem", lineHeight: "1.4" }}>
-          <li>Create an AWS Bedrock Agent in your AWS console</li>
+        </h4>
+        <ol style={{ marginLeft: "1.5rem", color: "rgba(255, 255, 255, 0.9)" }}>
+          <li>Create a Bedrock Agent in AWS Console</li>
           <li>Note down the Agent ID and Alias ID</li>
-          <li>Create IAM credentials with Bedrock permissions</li>
-          <li>Enter your credentials above and connect</li>
+          <li>Ensure your AWS credentials have Bedrock permissions</li>
+          <li>Fill in the configuration above and click Connect</li>
         </ol>
       </div>
     </div>

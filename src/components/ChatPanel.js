@@ -1,5 +1,5 @@
-import React, { useState, useRef, useEffect } from "react";
-import { Send } from "lucide-react";
+import React, { useState, useRef, useEffect, useCallback } from "react";
+import { Send, MessageCircle, Trash2 } from "lucide-react";
 import TroubleshootingPanel from "./TroubleshootingPanel";
 import awsService from "../services/awsService";
 
@@ -9,25 +9,63 @@ const ChatPanel = ({ connectionStatus, onSendMessage }) => {
   const [isLoading, setIsLoading] = useState(false);
   const [showTroubleshooting, setShowTroubleshooting] = useState(false);
   const [lastError, setLastError] = useState("");
+  const [streamingMessageId, setStreamingMessageId] = useState(null);
+  const [shouldAutoScroll, setShouldAutoScroll] = useState(true);
   const messagesEndRef = useRef(null);
+  const chatMessagesRef = useRef(null);
 
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  const scrollToBottom = useCallback(() => {
+    if (shouldAutoScroll && messagesEndRef.current) {
+      messagesEndRef.current.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [shouldAutoScroll]);
+
+  // Check if user is near the bottom of the chat
+  const checkScrollPosition = () => {
+    if (chatMessagesRef.current) {
+      const { scrollTop, scrollHeight, clientHeight } = chatMessagesRef.current;
+      const isNearBottom = scrollHeight - scrollTop - clientHeight < 100;
+      setShouldAutoScroll(isNearBottom);
+    }
   };
 
+  // Only scroll on new messages, not during streaming updates
   useEffect(() => {
-    scrollToBottom();
-  }, [messages]);
+    const messageCount = messages.length;
+    if (messageCount > 0) {
+      const lastMessage = messages[messageCount - 1];
+      // Only auto-scroll for new messages, not streaming updates
+      if (lastMessage.id !== streamingMessageId) {
+        scrollToBottom();
+      }
+    }
+  }, [messages.length, streamingMessageId, scrollToBottom]);
 
-  const addMessage = (message, type = "user") => {
+  // Scroll when streaming starts (new message added)
+  useEffect(() => {
+    if (streamingMessageId && shouldAutoScroll) {
+      scrollToBottom();
+    }
+  }, [streamingMessageId, shouldAutoScroll, scrollToBottom]);
+
+  const addMessage = (message, type = "user", id = null) => {
+    const messageId = id || Date.now();
     const newMessage = {
-      id: Date.now(),
+      id: messageId,
       text: message,
       type: type,
       timestamp: new Date().toLocaleTimeString(),
     };
     setMessages((prev) => [...prev, newMessage]);
-    return newMessage;
+    return messageId;
+  };
+
+  const updateMessage = (messageId, newText) => {
+    setMessages((prev) =>
+      prev.map((msg) =>
+        msg.id === messageId ? { ...msg, text: newText } : msg
+      )
+    );
   };
 
   const handleSubmit = async (e) => {
@@ -44,33 +82,66 @@ const ChatPanel = ({ connectionStatus, onSendMessage }) => {
     // Add user message
     addMessage(userMessage, "user");
 
+    // Create a placeholder message for the agent response
+    const agentMessageId = Date.now() + 1;
+    addMessage("", "agent", agentMessageId);
+    setStreamingMessageId(agentMessageId);
+
     try {
-      // Send message to AWS agent
-      const response = await onSendMessage(userMessage);
+      // Use the streaming method for real-time updates
+      await awsService.sendMessageStream(userMessage, {
+        onStart: () => {
+          // Message placeholder already created
+        },
+        onChunk: (chunk, fullResponse) => {
+          // Update the agent message with the new chunk
+          updateMessage(agentMessageId, fullResponse);
+          // Only scroll if user is near bottom during streaming
+          if (shouldAutoScroll) {
+            setTimeout(() => {
+              messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+            }, 50);
+          }
+        },
+        onComplete: (fullResponse) => {
+          // Ensure the final response is set
+          updateMessage(
+            agentMessageId,
+            fullResponse || "Agent response completed"
+          );
+          setLastError(""); // Clear any previous errors
+          setIsLoading(false);
+          setStreamingMessageId(null);
+        },
+        onError: (error) => {
+          // Remove the empty agent message and add error message
+          setMessages((prev) =>
+            prev.filter((msg) => msg.id !== agentMessageId)
+          );
+          const errorMessage = `Error: ${error.message}`;
+          addMessage(errorMessage, "error");
+          setLastError(error.message);
 
-      if (response.success) {
-        addMessage(response.response, "agent");
-        setLastError(""); // Clear any previous errors
-      } else {
-        const errorMessage = `Error: ${
-          response.message || "Failed to get response from agent"
-        }`;
-        addMessage(errorMessage, "error");
-        setLastError(response.message || "Unknown error");
+          // Show troubleshooting panel for specific errors
+          if (
+            error.message &&
+            (error.message.includes("Agent not found") ||
+              error.message.includes("404") ||
+              error.message.includes("Access denied") ||
+              error.message.includes("403"))
+          ) {
+            setShowTroubleshooting(true);
+          }
 
-        // Show troubleshooting panel for specific errors
-        if (
-          response.message &&
-          (response.message.includes("Agent not found") ||
-            response.message.includes("404") ||
-            response.message.includes("Access denied") ||
-            response.message.includes("403"))
-        ) {
-          setShowTroubleshooting(true);
-        }
-      }
+          setIsLoading(false);
+          setStreamingMessageId(null);
+        },
+      });
     } catch (error) {
       console.error("Error sending message:", error);
+
+      // Remove the empty agent message and add error message
+      setMessages((prev) => prev.filter((msg) => msg.id !== agentMessageId));
       const errorMessage = `Error: ${error.message}`;
       addMessage(errorMessage, "error");
       setLastError(error.message);
@@ -85,8 +156,9 @@ const ChatPanel = ({ connectionStatus, onSendMessage }) => {
       ) {
         setShowTroubleshooting(true);
       }
-    } finally {
+
       setIsLoading(false);
+      setStreamingMessageId(null);
     }
   };
 
@@ -101,6 +173,8 @@ const ChatPanel = ({ connectionStatus, onSendMessage }) => {
     setMessages([]);
     setLastError("");
     setShowTroubleshooting(false);
+    setStreamingMessageId(null);
+    setShouldAutoScroll(true);
   };
 
   const closeTroubleshooting = () => {
@@ -114,22 +188,22 @@ const ChatPanel = ({ connectionStatus, onSendMessage }) => {
           display: "flex",
           justifyContent: "space-between",
           alignItems: "center",
-          marginBottom: "1rem",
+          marginBottom: "1.5rem",
         }}
       >
-        <h2>Chat with AWS Agent</h2>
-        <div style={{ display: "flex", gap: "0.5rem" }}>
+        <h2>
+          <MessageCircle size={24} />
+          Chat with AWS Agent
+        </h2>
+        <div style={{ display: "flex", gap: "0.75rem" }}>
           {lastError && (
             <button
               onClick={() => setShowTroubleshooting(true)}
+              className="troubleshoot-btn"
               style={{
-                background: "#dc3545",
-                color: "white",
-                border: "none",
-                padding: "0.5rem 1rem",
-                borderRadius: "4px",
-                cursor: "pointer",
+                padding: "0.75rem 1.25rem",
                 fontSize: "0.9rem",
+                borderRadius: "12px",
               }}
             >
               Troubleshoot
@@ -138,49 +212,71 @@ const ChatPanel = ({ connectionStatus, onSendMessage }) => {
           {messages.length > 0 && (
             <button
               onClick={clearChat}
+              className="clear-chat-btn"
               style={{
-                background: "none",
-                border: "1px solid #ccc",
-                padding: "0.5rem 1rem",
-                borderRadius: "4px",
-                cursor: "pointer",
+                display: "flex",
+                alignItems: "center",
+                gap: "0.5rem",
+                padding: "0.75rem 1.25rem",
                 fontSize: "0.9rem",
+                borderRadius: "12px",
               }}
             >
+              <Trash2 size={16} />
               Clear Chat
             </button>
           )}
         </div>
       </div>
 
-      <div className="chat-messages">
+      <div
+        className="chat-messages"
+        ref={chatMessagesRef}
+        onScroll={checkScrollPosition}
+      >
         {messages.length === 0 ? (
           <div
             style={{
               textAlign: "center",
-              color: "#666",
-              padding: "2rem",
+              color: "rgba(255, 255, 255, 0.7)",
+              padding: "3rem 2rem",
               fontStyle: "italic",
+              fontSize: "1.1rem",
             }}
           >
             {connectionStatus.isConnected
-              ? "Start a conversation with your AWS agent..."
-              : "Please connect to an AWS agent first to start chatting."}
+              ? "✨ Start a conversation with your AWS agent..."
+              : "🔗 Please connect to an AWS agent first to start chatting."}
           </div>
         ) : (
           messages.map((message) => (
             <div key={message.id} className={`message ${message.type}`}>
-              <div style={{ whiteSpace: "pre-wrap" }}>{message.text}</div>
+              <div style={{ whiteSpace: "pre-wrap" }}>
+                {message.text}
+                {/* Show typing indicator for streaming messages */}
+                {streamingMessageId === message.id &&
+                  message.type === "agent" && (
+                    <span
+                      style={{
+                        opacity: 0.7,
+                        animation: "blink 1s infinite",
+                        marginLeft: "2px",
+                      }}
+                    >
+                      ▋
+                    </span>
+                  )}
+              </div>
               <div className="message-time">{message.timestamp}</div>
             </div>
           ))
         )}
 
-        {isLoading && (
+        {isLoading && !streamingMessageId && (
           <div className="message agent">
             <div className="loading">
               <div className="spinner"></div>
-              Agent is thinking...
+              Connecting to agent...
             </div>
           </div>
         )}
@@ -196,7 +292,9 @@ const ChatPanel = ({ connectionStatus, onSendMessage }) => {
           onKeyPress={handleKeyPress}
           placeholder={
             connectionStatus.isConnected
-              ? "Type your message here..."
+              ? isLoading
+                ? "Agent is responding..."
+                : "Type your message here..."
               : "Connect to an agent first..."
           }
           disabled={!connectionStatus.isConnected || isLoading}
@@ -212,34 +310,24 @@ const ChatPanel = ({ connectionStatus, onSendMessage }) => {
       </form>
 
       {!connectionStatus.isConnected && (
-        <div
-          style={{
-            marginTop: "1rem",
-            padding: "1rem",
-            background: "#fff3cd",
-            border: "1px solid #ffeaa7",
-            borderRadius: "8px",
-            color: "#856404",
-            fontSize: "0.9rem",
-          }}
-        >
-          <strong>Note:</strong> You need to configure and connect to an AWS
+        <div className="warning-box" style={{ marginTop: "1.5rem" }}>
+          <strong>💡 Note:</strong> You need to configure and connect to an AWS
           agent before you can start chatting.
         </div>
       )}
 
-      <div
-        style={{
-          marginTop: "1rem",
-          padding: "1rem",
-          background: "#f8f9fa",
-          borderRadius: "8px",
-          fontSize: "0.9rem",
-          color: "#666",
-        }}
-      >
-        <h4 style={{ marginBottom: "0.5rem" }}>Sample Questions to Try:</h4>
-        <ul style={{ marginLeft: "1rem", lineHeight: "1.4" }}>
+      <div className="sample-questions" style={{ marginTop: "1.5rem" }}>
+        <h4
+          style={{
+            marginBottom: "1rem",
+            display: "flex",
+            alignItems: "center",
+            gap: "0.5rem",
+          }}
+        >
+          💬 Sample Questions to Try:
+        </h4>
+        <ul style={{ marginLeft: "1.5rem", lineHeight: "1.6" }}>
           <li>What can you help me with?</li>
           <li>Tell me about your capabilities</li>
           <li>How can I use AWS services effectively?</li>

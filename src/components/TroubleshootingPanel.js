@@ -4,9 +4,6 @@ import { AlertTriangle, CheckCircle, XCircle, Info } from "lucide-react";
 const TroubleshootingPanel = ({ error, config }) => {
   if (!error) return null;
 
-  const is404Error = error.includes("Agent not found") || error.includes("404");
-  const is403Error = error.includes("Access denied") || error.includes("403");
-
   const troubleshootingSteps = [
     {
       title: "Verify Agent Configuration",
